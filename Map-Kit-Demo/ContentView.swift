@@ -18,7 +18,7 @@ struct ContentView: View {
     @State private var route: MKRoute?
     @State private var mapStyle: MapStyle = .standard
     @StateObject private var locationManager = LocationManager()
-    @State private var trackingMode: MapUserTrackingMode = .follow
+
 
 
     
@@ -35,6 +35,7 @@ struct ContentView: View {
     )
 
     @State private var showUserLocation = true
+    @State private var selectedDestination: CLLocationCoordinate2D?
 
     // Coordinates
     let uCalgary = CLLocationCoordinate2D(latitude: 51.07885784940875, longitude: -114.13220927966469)
@@ -43,40 +44,66 @@ struct ContentView: View {
     var body: some View {
         ZStack(alignment: .top) {
             // MARK: - MAP VIEW
-            Map(position: $cameraPosition, interactionModes: [.all]) {
-                
-                // Static annotation
-                Annotation("University of Calgary", coordinate: uCalgary) {
-                    Image(systemName: "mappin.circle.fill")
-                        .foregroundColor(.red)
-                        .font(.title)
+            MapReader { proxy in
+                Map(position: $cameraPosition, interactionModes: [.all]) {
+                    
+                    // Static annotation
+                    Annotation("University of Calgary", coordinate: uCalgary) {
+                        Image(systemName: "mappin.circle.fill")
+                            .foregroundColor(.red)
+                            .font(.title)
+                    }
+                    
+                    // Search result markers
+                    ForEach(searchResults, id: \.self) { item in
+                        Marker(item: item)
+                    }
+                    
+                    // Selected destination marker
+                    if let selectedDestination = selectedDestination {
+                        Annotation("Selected Location", coordinate: selectedDestination) {
+                            Image(systemName: "mappin.circle.fill")
+                                .foregroundColor(.green)
+                                .font(.title)
+                        }
+                    }
+                    
+                    // Draw route overlay if available
+                    if let route = route {
+                        MapPolyline(route.polyline)
+                            .stroke(.blue, lineWidth: 4)
+                    }
+                    
+                    // Example of a circular overlay (around UCalgary)
+                    MapCircle(center: uCalgary, radius: 50)
+                        .stroke(.orange, lineWidth: 2)
+                        .foregroundStyle(.orange.opacity(0.2))
                 }
-                
-                // Search result markers
-                ForEach(searchResults, id: \.self) { item in
-                    Marker(item: item)
+                .onMapCameraChange { context in
+                    searchCompleter.region = context.region
                 }
-                
-                // Draw route overlay if available
-                if let route = route {
-                    MapPolyline(route.polyline)
-                        .stroke(.blue, lineWidth: 4)
+                .mapStyle(mapStyle)
+                .mapControls {
+                    MapUserLocationButton()
+                    MapCompass()
+                    MapPitchToggle()
                 }
-                
-                // Example of a circular overlay (around UCalgary)
-                MapCircle(center: uCalgary, radius: 50)
-                    .stroke(.orange, lineWidth: 2)
-                    .foregroundStyle(.orange.opacity(0.2))
-            }
-            
-            .onMapCameraChange { context in
-                searchCompleter.region = context.region
-            }
-            .mapStyle(mapStyle)
-            .mapControls {
-                MapUserLocationButton()
-                MapCompass()
-                MapPitchToggle()
+                .onTapGesture { screenCoordinate in
+                    print("🔵 Map tapped at screen coordinate: \(screenCoordinate)")
+                    if let coordinate = proxy.convert(screenCoordinate, from: .local) {
+                        print("✅ Converted to map coordinate: \(coordinate)")
+                        selectedDestination = coordinate
+                        loadLookAroundScene(for: coordinate)
+                        
+                        // Add haptic feedback to confirm the action
+                        #if os(iOS)
+                        let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
+                        impactFeedback.impactOccurred()
+                        #endif
+                    } else {
+                        print("❌ Failed to convert coordinate")
+                    }
+                }
             }
             .edgesIgnoringSafeArea(.all)
             .overlay(alignment: .bottomLeading) {
@@ -85,14 +112,11 @@ struct ContentView: View {
                         .frame(width: 230, height: 140)
                         .cornerRadius(10)
                         .padding(8)
+                        .allowsHitTesting(false) // Important: prevent blocking taps
                 }
             }
             .onAppear {
                 loadLookAroundScene()
-            }
-            .onChange(of: searchQuery) { newValue in
-                searchCompleter.updateQuery(newValue)
-                showSuggestions = !newValue.isEmpty
             }
             
 
@@ -104,10 +128,6 @@ struct ContentView: View {
                         .background(Color.white.opacity(0.9))
                         .cornerRadius(12)
                         .shadow(color: .black.opacity(0.2), radius: 4, x: 0, y: 2)
-                        .onChange(of: searchQuery) { newValue in
-                            searchCompleter.updateQuery(newValue)
-                            showSuggestions = !newValue.isEmpty
-                        }
                         .padding(.horizontal)
 
                     Button("Go") {
@@ -117,7 +137,7 @@ struct ContentView: View {
                 }
 
                 // Autocomplete suggestion list
-                if showSuggestions {
+                if showSuggestions && !searchCompleter.results.isEmpty {
                     List(searchCompleter.results, id: \.self) { completion in
                         Button {
                             selectSuggestion(completion)
@@ -135,9 +155,11 @@ struct ContentView: View {
                     .background(.ultraThinMaterial)
                     .cornerRadius(10)
                     .padding(.horizontal)
+                    .shadow(radius: 5)
                 }
             }
             .padding(.top, 50)
+            .allowsHitTesting(true) // Only allow hits on the search UI
 
 
             // MARK: - BOTTOM TOOLBAR
@@ -169,6 +191,7 @@ struct ContentView: View {
                 .cornerRadius(16)
                 .padding()
             }
+            .allowsHitTesting(true) // Only allow hits on the toolbar
         }
     }
 
@@ -185,11 +208,15 @@ struct ContentView: View {
         }
     }
 
-    func loadLookAroundScene() {
-        let request = MKLookAroundSceneRequest(coordinate: uCalgary)
+    func loadLookAroundScene(for coordinate: CLLocationCoordinate2D = CLLocationCoordinate2D(latitude: 51.07885784940875, longitude: -114.13220927966469)) {
+        let request = MKLookAroundSceneRequest(coordinate: coordinate)
         request.getSceneWithCompletionHandler { scene, error in
-            if let scene = scene {
-                lookAroundScene = scene
+            DispatchQueue.main.async {
+                if let scene = scene {
+                    self.lookAroundScene = scene
+                } else if let error = error {
+                    print("LookAround error: \(error.localizedDescription)")
+                }
             }
         }
     }
@@ -225,29 +252,46 @@ struct ContentView: View {
         let request = MKLocalSearch.Request(completion: completion)
         MKLocalSearch(request: request).start { response, _ in
             if let items = response?.mapItems {
-                self.searchResults = items
-                if let first = items.first {
-                    self.cameraPosition = .region(
-                        MKCoordinateRegion(
-                            center: first.placemark.coordinate,
-                            latitudinalMeters: 2000,
-                            longitudinalMeters: 2000
+                DispatchQueue.main.async {
+                    self.searchResults = items
+                    if let first = items.first {
+                        let coordinate = first.placemark.coordinate
+                        self.selectedDestination = coordinate
+                        self.cameraPosition = .region(
+                            MKCoordinateRegion(
+                                center: coordinate,
+                                latitudinalMeters: 2000,
+                                longitudinalMeters: 2000
+                            )
                         )
-                    )
+                        self.loadLookAroundScene(for: coordinate)
+                    }
                 }
             }
         }
     }
 
     func drawRoute() {
-        guard let destination = searchResults.first else { return }
         guard let userLocation = locationManager.lastLocation else {
             print("No user location yet")
             return
         }
+        
+        // Use selected destination first, then fall back to search results
+        let destinationCoordinate: CLLocationCoordinate2D?
+        if let selected = selectedDestination {
+            destinationCoordinate = selected
+        } else if let firstResult = searchResults.first {
+            destinationCoordinate = firstResult.placemark.coordinate
+        } else {
+            print("No destination selected")
+            return
+        }
+        
+        guard let destCoord = destinationCoordinate else { return }
 
         let sourceItem = MKMapItem(location: userLocation, address: nil)
-        let destinationItem = MKMapItem(location: destination.location, address: nil)
+        let destinationItem = MKMapItem(placemark: MKPlacemark(coordinate: destCoord))
 
         let request = MKDirections.Request()
         request.source = sourceItem
@@ -282,20 +326,46 @@ class SearchCompleter: NSObject, ObservableObject, MKLocalSearchCompleterDelegat
 
     override init() {
         super.init()
+        print("SearchCompleter init started")
         completer.delegate = self
         completer.resultTypes = .address
+        // Set initial region to Calgary
+        completer.region = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: 51.0455, longitude: -114.0729),
+            latitudinalMeters: 30000,
+            longitudinalMeters: 30000
+        )
+        print("SearchCompleter initialized with delegate: \(completer.delegate != nil)")
+        print("SearchCompleter initialized with region: Calgary")
     }
 
     func updateQuery(_ query: String) {
+        print("Updating query to: '\(query)'")
+        print("Completer delegate is: \(completer.delegate != nil)")
         completer.queryFragment = query
+        
+        // Let's also try a manual search as a test
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            print("Manual check - completer has \(self.completer.results.count) results")
+            if !self.completer.results.isEmpty {
+                print("Manual results found, updating...")
+                self.results = self.completer.results
+            }
+        }
     }
 
     func completer(_ completer: MKLocalSearchCompleter, didUpdateResults results: [MKLocalSearchCompletion]) {
-        self.results = results
+        print("DELEGATE CALLED: Received \(results.count) autocomplete results")
+        for result in results.prefix(3) {
+            print("  - \(result.title): \(result.subtitle)")
+        }
+        DispatchQueue.main.async {
+            self.results = results
+        }
     }
 
     func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) {
-        print("Autocomplete error:", error.localizedDescription)
+        print("DELEGATE CALLED: Autocomplete error: \(error.localizedDescription)")
     }
 }
 
